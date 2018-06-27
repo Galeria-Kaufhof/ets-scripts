@@ -18,12 +18,17 @@ if [ -z "$DEPLOYMENT_REPOSITORIES" ]; then
     exit 1
 fi
 
+declare -A DEPLOYMENT_USERS
+declare -A DEPLOYMENT_PASSWORDS
+
 for DEPLOYMENT_REPOSITORY in $DEPLOYMENT_REPOSITORIES; do
-    # http://maven.apache.org/plugins/maven-deploy-plugin/deploy-mojo.html#altDeploymentRepository
-    if ! [[ "$DEPLOYMENT_REPOSITORY" =~ ^(.*)::(.*)::(.*)$ ]]; then
-        echo "Repository $DEPLOYMENT_REPOSITORY does not match the expected scheme ID::LAYOUT::URL"
-        exit 1
-    fi
+    echo "Reading credentials for $DEPLOYMENT_REPOSITORY"
+    
+    read -p "Upload username: " UPLOAD_USER
+    read -s -p "Upload password: " UPLOAD_PASSWORD
+
+    DEPLOYMENT_USERS["$DEPLOYMENT_REPOSITORY"]="$UPLOAD_USER"
+    DEPLOYMENT_PASSWORDS["$DEPLOYMENT_REPOSITORY"]="$UPLOAD_PASSWORD"
 done
 
 SCRIPT_DIR="$(cd $(dirname ${BASH_SOURCE[0]}) && pwd)"
@@ -53,11 +58,20 @@ git commit -a -m "[release] Update POM versions to development $DEVELOPMENT_VERS
 # Build and publish release artifacts
 git checkout "$RELEASE_TAG"
 
-mvn clean package
+TEMP_ARTIFACT_DIR="$(mktemp -d -p target --suffix .artifacts)"
+
+mvn clean
+mvn package source:jar javadoc:jar gpg:sign deploy -DaltDeploymentRepository="local::default::file:$TEMP_ARTIFACT_DIR"
 
 for DEPLOYMENT_REPOSITORY in $DEPLOYMENT_REPOSITORIES; do
-    # https://maven.apache.org/plugins/maven-gpg-plugin/examples/deploy-signed-artifacts.html
-    mvn verify gpg:sign deploy -DaltDeploymentRepository="$DEPLOYMENT_REPOSITORY"
+    # Sort files, because Artifactory refuses md5 sum files if the file for the sum does not exist before
+    for LOCAL_FILE in $(cd "$TEMP_ARTIFACT_DIR" && find * -type f | sort); do
+        REMOTE_FILE="$DEPLOYMENT_REPOSITORY/$LOCAL_FILE"
+        LOCAL_FILE_PATH="$TEMP_ARTIFACT_DIR/$LOCAL_FILE"
+
+        echo "Uploading $LOCAL_FILE_PATH to $REMOTE_FILE"
+        curl -L -f -u "${DEPLOYMENT_USERS["$DEPLOYMENT_REPOSITORY"]}":"${DEPLOYMENT_PASSWORDS["$DEPLOYMENT_REPOSITORY"]}" --upload-file "$LOCAL_FILE_PATH" "$REMOTE_FILE"
+    done
 done
 
 # Push commits
