@@ -65,3 +65,4 @@ git checkout "$RELEASE_BRANCH"
 
 GIT_UPSTREAM_URL=$("$SCRIPT_DIR/git-upstream-url.py")
 git push "$GIT_UPSTREAM_URL" "$RELEASE_BRANCH"
+git push "$GIT_UPSTREAM_URL" "$RELEASE_TAG"
