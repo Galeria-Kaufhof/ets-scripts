@@ -65,7 +65,7 @@ mkdir -p "$TEMP_ARTIFACT_ROOT_DIR"
 TEMP_ARTIFACT_DIR="$(mktemp -d -p $TEMP_ARTIFACT_ROOT_DIR --suffix .artifacts)"
 
 mvn clean
-mvn package source:jar javadoc:jar gpg:sign deploy -DaltDeploymentRepository="local::default::file:$TEMP_ARTIFACT_DIR"
+mvn package source:jar net.alchim31.maven:scala-maven-plugin:3.4.1:doc-jar gpg:sign deploy -DaltDeploymentRepository="local::default::file:$TEMP_ARTIFACT_DIR"
 
 for DEPLOYMENT_REPOSITORY in $DEPLOYMENT_REPOSITORIES; do
     # Sort files, because Artifactory refuses md5 sum files if the file for the sum does not exist before
