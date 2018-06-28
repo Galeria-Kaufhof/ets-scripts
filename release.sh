@@ -26,6 +26,7 @@ for DEPLOYMENT_REPOSITORY in $DEPLOYMENT_REPOSITORIES; do
     
     read -p "Upload username: " UPLOAD_USER
     read -s -p "Upload password: " UPLOAD_PASSWORD
+    echo
 
     DEPLOYMENT_USERS["$DEPLOYMENT_REPOSITORY"]="$UPLOAD_USER"
     DEPLOYMENT_PASSWORDS["$DEPLOYMENT_REPOSITORY"]="$UPLOAD_PASSWORD"
@@ -58,7 +59,10 @@ git commit -a -m "[release] Update POM versions to development $DEVELOPMENT_VERS
 # Build and publish release artifacts
 git checkout "$RELEASE_TAG"
 
-TEMP_ARTIFACT_DIR="$(mktemp -d -p target --suffix .artifacts)"
+TEMP_ARTIFACT_ROOT_DIR="target"
+mkdir -p "$TEMP_ARTIFACT_ROOT_DIR"
+
+TEMP_ARTIFACT_DIR="$(mktemp -d -p $TEMP_ARTIFACT_ROOT_DIR --suffix .artifacts)"
 
 mvn clean
 mvn package source:jar javadoc:jar gpg:sign deploy -DaltDeploymentRepository="local::default::file:$TEMP_ARTIFACT_DIR"
