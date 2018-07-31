@@ -42,7 +42,13 @@ function build_files {
     mvn versions:set -DnewVersion="$RELEASE_VERSION" -DgenerateBackupPoms="false" -DprocessAllModules="true"
 
     git commit -a -m "[release] Update POM versions to release $RELEASE_VERSION"
-    git tag -s -m "[release] Release version $RELEASE_TAG" "$RELEASE_TAG"
+
+    GIT_TAG_SIGNING_ARGS=(-s)
+    if [ -n "$GPG_RELEASE_KEY_ID" ]; then
+        GIT_TAG_SIGNING_ARGS+=(-u "$GPG_RELEASE_KEY_ID")
+    fi
+    
+    git tag "${GIT_TAG_SIGNING_ARGS[@]}" -m "[release] Release version $RELEASE_TAG" "$RELEASE_TAG"
 
     # Create development commit
     mvn versions:set -DnewVersion="$DEVELOPMENT_VERSION" -DgenerateBackupPoms="false" -DprocessAllModules="true"
@@ -53,7 +59,13 @@ function build_files {
     git checkout "$RELEASE_TAG"
 
     mvn clean
-    mvn package source:jar net.alchim31.maven:scala-maven-plugin:3.4.1:doc-jar gpg:sign deploy -DaltDeploymentRepository="local::default::file:$ARTIFACT_DIRECTORY"
+
+    GPG_MAVEN_SIGNING_ARGS=(gpg:sign)
+    if [ -n "$GPG_RELEASE_KEY_ID" ]; then
+        GPG_MAVEN_SIGNING_ARGS+=(-Dkeyname="$GPG_RELEASE_KEY_ID")
+    fi
+
+    mvn package source:jar net.alchim31.maven:scala-maven-plugin:3.4.1:doc-jar "${GPG_MAVEN_SIGNING_ARGS[@]}"  deploy -DaltDeploymentRepository="local::default::file:$ARTIFACT_DIRECTORY"
 
     echo "Deployed locally built files to $ARTIFACT_DIRECTORY"
     echo "To deploy the files to a remote repository, use $0 --deploy $ARTIFACT_DIRECTORY"
@@ -72,12 +84,17 @@ function deploy_files_to_repository {
     echo
 
     # Sort files, because Artifactory refuses md5 sum files if the file for the sum does not exist before
-    for LOCAL_FILE in $(cd "$ARTIFACT_DIRECTORY" && find * -type f | sort); do
+    local FILES_FOR_DEPLOYMENT="$(cd "$ARTIFACT_DIRECTORY" && find * -type f | sort)"
+
+    local FILE_DEPLOYMENT_COUNTER=1
+    local NUMBER_OF_FILES_FOR_DEPLOYMENT="$(echo $FILES_FOR_DEPLOYMENT | wc -w)"
+    for LOCAL_FILE in $FILES_FOR_DEPLOYMENT; do
         REMOTE_FILE="$DEPLOYMENT_REPOSITORY/$LOCAL_FILE"
         LOCAL_FILE_PATH="$ARTIFACT_DIRECTORY/$LOCAL_FILE"
 
-        echo "Uploading $LOCAL_FILE_PATH to $REMOTE_FILE"
+        echo "[$FILE_DEPLOYMENT_COUNTER/$NUMBER_OF_FILES_FOR_DEPLOYMENT] Uploading $LOCAL_FILE_PATH to $REMOTE_FILE"
         curl -L -f -u "$UPLOAD_USER":"$UPLOAD_PASSWORD" --upload-file "$LOCAL_FILE_PATH" "$REMOTE_FILE"
+        FILE_DEPLOYMENT_COUNTER=$((FILE_DEPLOYMENT_COUNTER + 1))
     done
 
     # Push commits
