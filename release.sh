@@ -2,85 +2,133 @@
 
 set -e
 
-echo -n "Release version: "
-read RELEASE_VERSION
-
-DEPLOYMENT_REPOSITORIES="$@"
- 
-if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Version does not match the expected scheme MAJOR.MINOR.BUGFIX"
-    exit 1
-fi
-
-if [ -z "$DEPLOYMENT_REPOSITORIES" ]; then
-    echo "You did not pass repositories for artifact deployment"
-    echo "To do so, use $0 [<repository>...]"
-    exit 1
-fi
-
-declare -A DEPLOYMENT_USERS
-declare -A DEPLOYMENT_PASSWORDS
-
-for DEPLOYMENT_REPOSITORY in $DEPLOYMENT_REPOSITORIES; do
-    echo "Reading credentials for $DEPLOYMENT_REPOSITORY"
-    
-    read -p "Upload username: " UPLOAD_USER
-    read -s -p "Upload password: " UPLOAD_PASSWORD
-    echo
-
-    DEPLOYMENT_USERS["$DEPLOYMENT_REPOSITORY"]="$UPLOAD_USER"
-    DEPLOYMENT_PASSWORDS["$DEPLOYMENT_REPOSITORY"]="$UPLOAD_PASSWORD"
-done
-
 SCRIPT_DIR="$(cd $(dirname ${BASH_SOURCE[0]}) && pwd)"
 
-MAJOR_VERSION=$(echo $RELEASE_VERSION | cut -d '.' -f1)
-MINOR_VERSION=$(echo $RELEASE_VERSION | cut -d '.' -f2)
+function mk_temp_directory {
+    TEMP_ARTIFACT_ROOT_DIR="target"
+    mkdir -p "$TEMP_ARTIFACT_ROOT_DIR"
 
-DEVELOPMENT_VERSION="$MAJOR_VERSION.$(($MINOR_VERSION + 1)).0-SNAPSHOT"
+    TEMP_ARTIFACT_DIR="$(mktemp -d -p $TEMP_ARTIFACT_ROOT_DIR --suffix .artifacts)"
 
-RELEASE_BRANCH="${MAJOR_VERSION}.x.x"
-RELEASE_TAG="$RELEASE_VERSION"
+    echo "$TEMP_ARTIFACT_DIR"
+}
 
-# Checkout to release branch
-git checkout "$RELEASE_BRANCH"
+function initialize_version_and_git_vars {
+    echo -n "Release version: "
+    read RELEASE_VERSION
 
-# Create release commit and tag
-mvn versions:set -DnewVersion="$RELEASE_VERSION" -DgenerateBackupPoms="false" -DprocessAllModules="true"
+    if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Version does not match the expected scheme MAJOR.MINOR.BUGFIX"
+        exit 1
+    fi
 
-git commit -a -m "[release] Update POM versions to release $RELEASE_VERSION"
-git tag -s -m "[release] Release version $RELEASE_TAG" "$RELEASE_TAG"
+    MAJOR_VERSION=$(echo $RELEASE_VERSION | cut -d '.' -f1)
+    MINOR_VERSION=$(echo $RELEASE_VERSION | cut -d '.' -f2)
 
-# Create development commit
-mvn versions:set -DnewVersion="$DEVELOPMENT_VERSION" -DgenerateBackupPoms="false" -DprocessAllModules="true"
+    DEVELOPMENT_VERSION="$MAJOR_VERSION.$(($MINOR_VERSION + 1)).0-SNAPSHOT"
 
-git commit -a -m "[release] Update POM versions to development $DEVELOPMENT_VERSION"
+    RELEASE_BRANCH="${MAJOR_VERSION}.x.x"
+    RELEASE_TAG="$RELEASE_VERSION"
+}
 
-# Build and publish release artifacts
-git checkout "$RELEASE_TAG"
+function build_files {
+    local ARTIFACT_DIRECTORY="$1"
+    [[ -z "$ARTIFACT_DIRECTORY" ]] && read -p "Local artifact directory: " ARTIFACT_DIRECTORY
 
-TEMP_ARTIFACT_ROOT_DIR="target"
-mkdir -p "$TEMP_ARTIFACT_ROOT_DIR"
+    # Checkout to release branch
+    git checkout "$RELEASE_BRANCH"
 
-TEMP_ARTIFACT_DIR="$(mktemp -d -p $TEMP_ARTIFACT_ROOT_DIR --suffix .artifacts)"
+    # Create release commit and tag
+    mvn versions:set -DnewVersion="$RELEASE_VERSION" -DgenerateBackupPoms="false" -DprocessAllModules="true"
 
-mvn clean
-mvn package source:jar net.alchim31.maven:scala-maven-plugin:3.4.1:doc-jar gpg:sign deploy -DaltDeploymentRepository="local::default::file:$TEMP_ARTIFACT_DIR"
+    git commit -a -m "[release] Update POM versions to release $RELEASE_VERSION"
 
-for DEPLOYMENT_REPOSITORY in $DEPLOYMENT_REPOSITORIES; do
+    GIT_TAG_SIGNING_ARGS=(-s)
+    if [ -n "$GPG_RELEASE_KEY_ID" ]; then
+        GIT_TAG_SIGNING_ARGS+=(-u "$GPG_RELEASE_KEY_ID")
+    fi
+    
+    git tag "${GIT_TAG_SIGNING_ARGS[@]}" -m "[release] Release version $RELEASE_TAG" "$RELEASE_TAG"
+
+    # Create development commit
+    mvn versions:set -DnewVersion="$DEVELOPMENT_VERSION" -DgenerateBackupPoms="false" -DprocessAllModules="true"
+
+    git commit -a -m "[release] Update POM versions to development $DEVELOPMENT_VERSION"
+
+    # Build and publish release artifacts
+    git checkout "$RELEASE_TAG"
+
+    mvn clean
+
+    GPG_MAVEN_SIGNING_ARGS=(gpg:sign)
+    if [ -n "$GPG_RELEASE_KEY_ID" ]; then
+        GPG_MAVEN_SIGNING_ARGS+=(-Dkeyname="$GPG_RELEASE_KEY_ID")
+    fi
+
+    mvn package source:jar net.alchim31.maven:scala-maven-plugin:3.4.1:doc-jar "${GPG_MAVEN_SIGNING_ARGS[@]}"  deploy -DaltDeploymentRepository="local::default::file:$ARTIFACT_DIRECTORY"
+
+    echo "Deployed locally built files to $ARTIFACT_DIRECTORY"
+    echo "To deploy the files to a remote repository, use $0 --deploy $ARTIFACT_DIRECTORY"
+}
+
+function deploy_files_to_repository {
+    local ARTIFACT_DIRECTORY="$1"
+    local DEPLOYMENT_REPOSITORY="$2"
+    local UPLOAD_USER="$3"
+    local UPLOAD_PASSWORD="$4"
+
+    [[ -z "$ARTIFACT_DIRECTORY" ]] && read -p "Local artifact directory: " ARTIFACT_DIRECTORY
+    [[ -z "$DEPLOYMENT_REPOSITORY" ]] && read -p "Deployment repository: " DEPLOYMENT_REPOSITORY
+    [[ -z "$UPLOAD_USER" ]] && read -p "Upload username: " UPLOAD_USER
+    [[ -z "$UPLOAD_PASSWORD" ]] && read -s -p "Upload password: " UPLOAD_PASSWORD
+    echo
+
     # Sort files, because Artifactory refuses md5 sum files if the file for the sum does not exist before
-    for LOCAL_FILE in $(cd "$TEMP_ARTIFACT_DIR" && find * -type f | sort); do
+    local FILES_FOR_DEPLOYMENT="$(cd "$ARTIFACT_DIRECTORY" && find * -type f | sort)"
+
+    local FILE_DEPLOYMENT_COUNTER=1
+    local NUMBER_OF_FILES_FOR_DEPLOYMENT="$(echo $FILES_FOR_DEPLOYMENT | wc -w)"
+    for LOCAL_FILE in $FILES_FOR_DEPLOYMENT; do
         REMOTE_FILE="$DEPLOYMENT_REPOSITORY/$LOCAL_FILE"
-        LOCAL_FILE_PATH="$TEMP_ARTIFACT_DIR/$LOCAL_FILE"
+        LOCAL_FILE_PATH="$ARTIFACT_DIRECTORY/$LOCAL_FILE"
 
-        echo "Uploading $LOCAL_FILE_PATH to $REMOTE_FILE"
-        curl -L -f -u "${DEPLOYMENT_USERS["$DEPLOYMENT_REPOSITORY"]}":"${DEPLOYMENT_PASSWORDS["$DEPLOYMENT_REPOSITORY"]}" --upload-file "$LOCAL_FILE_PATH" "$REMOTE_FILE"
+        echo "[$FILE_DEPLOYMENT_COUNTER/$NUMBER_OF_FILES_FOR_DEPLOYMENT] Uploading $LOCAL_FILE_PATH to $REMOTE_FILE"
+        curl -L -f -u "$UPLOAD_USER":"$UPLOAD_PASSWORD" --upload-file "$LOCAL_FILE_PATH" "$REMOTE_FILE"
+        FILE_DEPLOYMENT_COUNTER=$((FILE_DEPLOYMENT_COUNTER + 1))
     done
-done
 
-# Push commits
-git checkout "$RELEASE_BRANCH"
+    # Push commits
+    git checkout "$RELEASE_BRANCH"
 
-GIT_UPSTREAM_URL=$("$SCRIPT_DIR/git-upstream-url.py")
-git push "$GIT_UPSTREAM_URL" "$RELEASE_BRANCH"
-git push "$GIT_UPSTREAM_URL" "$RELEASE_TAG"
+    GIT_UPSTREAM_URL=$("$SCRIPT_DIR/git-upstream-url.py")
+    git push "$GIT_UPSTREAM_URL" "$RELEASE_BRANCH"
+    git push "$GIT_UPSTREAM_URL" "$RELEASE_TAG"
+}
+
+case "$1" in
+    --build)
+        initialize_version_and_git_vars
+
+        ARTIFACT_DIRECTORY="$2"
+        [[ -z "$ARTIFACT_DIRECTORY" ]] && ARTIFACT_DIRECTORY="$(mk_temp_directory)"
+
+        build_files "$ARTIFACT_DIRECTORY"
+        ;;
+    --deploy)
+        initialize_version_and_git_vars
+
+        deploy_files_to_repository "$2"
+        ;;
+    --build-and-deploy)
+        initialize_version_and_git_vars
+
+        ARTIFACT_DIRECTORY="$2"
+        [[ -z "$ARTIFACT_DIRECTORY" ]] && ARTIFACT_DIRECTORY="$(mk_temp_directory)"
+
+        build_files "$ARTIFACT_DIRECTORY"
+        deploy_files_to_repository "$ARTIFACT_DIRECTORY"
+        ;;
+    *)
+        echo "Usage: $0 [--build/--build-and-deploy/--deploy]"
+        exit 1
+esac
