@@ -14,8 +14,10 @@ function mk_temp_directory {
 }
 
 function initialize_version_and_git_vars {
-    echo -n "Release version: "
-    read RELEASE_VERSION
+    if [ -z "$RELEASE_VERSION" ]; then
+        echo -n "Release version: "
+        read RELEASE_VERSION
+    fi
 
     if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "Version does not match the expected scheme MAJOR.MINOR.BUGFIX"
@@ -69,6 +71,10 @@ function build_files {
 
     echo "Deployed locally built files to $ARTIFACT_DIRECTORY"
     echo "To deploy the files to a remote repository, use $0 --deploy $ARTIFACT_DIRECTORY"
+    echo
+    echo "The Maven central deployment repository url is https://oss.sonatype.org/service/local/staging/deploy/maven2"
+    echo "For more information see https://central.sonatype.org/pages/ossrh-guide.html#accessing-repositories"
+    echo "To deploy the files to the Maven central repository, use RELEASE_VERSION='$RELEASE_VERSION' DEPLOYMENT_REPOSITORY='https://oss.sonatype.org/service/local/staging/deploy/maven2' $0 --deploy $ARTIFACT_DIRECTORY"
 }
 
 function deploy_files_to_repository {
@@ -105,6 +111,47 @@ function deploy_files_to_repository {
     git push "$GIT_UPSTREAM_URL" "$RELEASE_TAG"
 }
 
+function abort_build {
+    # Checkout to release branch
+    git checkout "$RELEASE_BRANCH"
+
+    local COMMITS_TO_RESET=0
+    if git log -1 --pretty=%B | grep -qF "[release] Update POM versions to release $RELEASE_VERSION"; then
+        COMMITS_TO_RESET=1
+    elif git log -1 --pretty=%B | grep -qF "[release] Update POM versions to development $DEVELOPMENT_VERSION"; then
+        COMMITS_TO_RESET=2
+    fi
+
+    # Remove tag
+    if [ $(git tag -l "$RELEASE_TAG") ]; then
+        echo -n "=== Remove tag $RELEASE_TAG? [y/n]:"
+        read REMOVE_TAG
+
+        if [ "$REMOVE_TAG" == "y" ]; then
+            git tag -d "$RELEASE_TAG"
+        fi
+    fi
+
+    # Reset commits
+    if [ $COMMITS_TO_RESET -gt 0 ]; then
+        echo
+        echo -n "=== Reset $COMMITS_TO_RESET commits and branch $(git rev-parse --abbrev-ref HEAD) to"$'\n'"$(git log -1 HEAD~$COMMITS_TO_RESET)"$'\n'"?[y/n]:"
+        read RESET_COMMITS
+
+        if [ "$RESET_COMMITS" == "y" ]; then
+            git reset --hard HEAD~$COMMITS_TO_RESET
+        fi
+    fi
+
+    # Remove files
+    echo -n "=== Remove built files? [y/n]:"
+    read REMOVE_BUILT_FILES
+
+    if [ "$REMOVE_BUILT_FILES" == "y" ]; then
+        mvn clean
+    fi
+}
+
 case "$1" in
     --build)
         initialize_version_and_git_vars
@@ -117,7 +164,7 @@ case "$1" in
     --deploy)
         initialize_version_and_git_vars
 
-        deploy_files_to_repository "$2"
+        deploy_files_to_repository "$2" "$DEPLOYMENT_REPOSITORY"
         ;;
     --build-and-deploy)
         initialize_version_and_git_vars
@@ -126,8 +173,14 @@ case "$1" in
         [[ -z "$ARTIFACT_DIRECTORY" ]] && ARTIFACT_DIRECTORY="$(mk_temp_directory)"
 
         build_files "$ARTIFACT_DIRECTORY"
-        deploy_files_to_repository "$ARTIFACT_DIRECTORY"
+        deploy_files_to_repository "$ARTIFACT_DIRECTORY" "$DEPLOYMENT_REPOSITORY"
         ;;
+    --abort-build)
+        initialize_version_and_git_vars
+
+        abort_build
+        ;;
+
     *)
         echo "Usage: $0 [--build/--build-and-deploy/--deploy]"
         exit 1
