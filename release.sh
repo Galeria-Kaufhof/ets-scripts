@@ -19,7 +19,7 @@ function initialize_version_and_git_vars {
         read RELEASE_VERSION
     fi
 
-    if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if ! valid_version "$RELEASE_VERSION"; then
         echo "Version does not match the expected scheme MAJOR.MINOR.BUGFIX"
         exit 1
     fi
@@ -31,6 +31,10 @@ function initialize_version_and_git_vars {
 
     RELEASE_BRANCH="${MAJOR_VERSION}.x.x"
     RELEASE_TAG="$RELEASE_VERSION"
+}
+
+function valid_version {
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && return $?
 }
 
 function build_files {
@@ -111,6 +115,61 @@ function deploy_files_to_repository {
     git push "$GIT_UPSTREAM_URL" "$RELEASE_TAG"
 }
 
+function merge_branches {
+    GIT_UPSTREAM_URL=$("$SCRIPT_DIR/git-upstream-url.py")
+    GIT_REMOTE_NAME="upstream"
+
+    # Check remote
+    if git ls-remote --exit-code $GIT_REMOTE_NAME > /dev/null; then
+        if [ "$(git remote get-url $GIT_REMOTE_NAME)" != "$GIT_UPSTREAM_URL" ]; then
+            SET_GIT_UPSTREAM_URL="$(git remote git-url $GIT_REMOTE_NAME)"
+            echo "Remote $GIT_REMOTE_NAME exists, but URL is $SET_GIT_UPSTREAM_URL instead of $GIT_UPSTREAM_URL"
+            echo "You can use 'git remote set-url $GIT_REMOTE_NAME $GIT_UPSTREAM_URL' to update your remote url"
+            exit 1
+        fi
+    else
+        echo "Remote $GIT_REMOTE_NAME does not exist, adding with URL $GIT_UPSTREAM_URL"
+        git remote add "$GIT_REMOTE_NAME" "$GIT_UPSTREAM_URL"
+    fi
+
+    # Update remote
+    git fetch "$GIT_REMOTE_NAME"
+
+    MAJOR_BRANCHES=($(git for-each-ref --format="%(refname:lstrip=-1)" "refs/remotes/$GIT_REMOTE_NAME" | grep -E "^[0-9]+\.x\.x$" | sort -n) master)
+
+    local INDEX=0
+    while [ $INDEX -lt $((${#MAJOR_BRANCHES[@]} - 1)) ];
+    do
+        local SOURCE_BRANCH="${MAJOR_BRANCHES[$INDEX]}"
+        local DESTINATION_BRANCH="${MAJOR_BRANCHES[$((INDEX + 1))]}"
+
+        # Merge remote branch into local branch
+        if git rev-parse --quiet --verify "$SOURCE_BRANCH" > /dev/null; then
+            git checkout "$SOURCE_BRANCH"
+            git pull "$GIT_REMOTE_NAME" "$SOURCE_BRANCH"
+        else
+            git checkout --track "$GIT_REMOTE_NAME"/"$SOURCE_BRANCH"
+        fi
+
+        read -n1 -p "Merge $SOURCE_BRANCH to $DESTINATION_BRANCH and push changes? (Y/n) " MERGE_BRANCH
+        echo
+
+        if [ -z "$MERGE_BRANCH" -o "$MERGE_BRANCH" = "y" -o "$MERGE_BRANCH" = "Y" ]; then
+            if git rev-parse --quiet --verify "$DESTINATION_BRANCH" > /dev/null; then
+                git checkout "$DESTINATION_BRANCH"
+                git pull "$GIT_REMOTE_NAME" "$DESTINATION_BRANCH"
+            else
+                git checkout --track "$GIT_REMOTE_NAME"/"$DESTINATION_BRANCH"
+            fi
+
+            git merge "$SOURCE_BRANCH"
+            git push "$GIT_UPSTREAM_URL" "$DESTINATION_BRANCH"
+        fi
+
+        INDEX=$((INDEX + 1))
+    done
+}
+
 function abort_build {
     # Checkout to release branch
     git checkout "$RELEASE_BRANCH"
@@ -180,8 +239,11 @@ case "$1" in
 
         abort_build
         ;;
+    --merge-branches)
+        merge_branches
+        ;;
 
     *)
-        echo "Usage: $0 [--build/--build-and-deploy/--deploy]"
+        echo "Usage: $0 [--abort-build/--build/--build-and-deploy/--deploy/--merge-branches]"
         exit 1
 esac
